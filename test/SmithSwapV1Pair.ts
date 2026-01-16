@@ -10,7 +10,7 @@ const initialReserveTokenB = parseEther("10");
 describe("AMM", function () {
   async function deployAmmFixture() {
     const publicClient = await viem.getPublicClient();
-    const [deployer, user, lpProvider] = await viem.getWalletClients();
+    const [deployer, user, lpProvider, feeRecepient] = await viem.getWalletClients();
     if (!deployer.account) {
       throw new Error("Wallet client has no account");
     }
@@ -32,7 +32,8 @@ describe("AMM", function () {
       "TokenAmm",
       "TKAMM",
       tokenA.address,
-      tokenB.address
+      tokenB.address,
+      feeRecepient.account.address
     ]);
 
     await tokenA.write.mint([owner, initialReserveTokenA]);
@@ -48,6 +49,7 @@ describe("AMM", function () {
       user,
       lpProvider,
       amm,
+      feeRecepient,
       tokenA,
       tokenB
     }
@@ -62,78 +64,120 @@ describe("AMM", function () {
     const tokenBTotalSupply = await tokenB.read.totalSupply();
     assert.equal(tokenBTotalSupply, parseEther("10"));
   });
+
+  it("protocol fee", async function() {
+    const { tokenA, tokenB, user, lpProvider, amm, feeRecepient } = await networkHelpers.loadFixture(deployAmmFixture);
+
+    await tokenA.write.mint([user.account.address, parseEther("100")]);
+    await tokenB.write.mint([user.account.address, parseEther("100")]);
+
+    // generate profit
+    const swapAmount = parseEther("1");
+
+    for (let i = 0; i < 10; i++) {
+      await tokenA.write.approve([amm.address, swapAmount], {account: user.account});
+      await amm.write.swapXForY([swapAmount, user.account.address], {account: user.account});
+
+      await tokenB.write.approve([amm.address, swapAmount], {account: user.account});
+      await amm.write.swapYForX([swapAmount, user.account.address], {account: user.account});
+    }
+
+    const tokenAAmount = parseEther("20");
+    const tokenBAmount = parseEther("20");
+    await tokenA.write.mint([lpProvider.account.address, tokenAAmount]);
+    await tokenB.write.mint([lpProvider.account.address, tokenBAmount]);
+    await tokenA.write.approve([amm.address, tokenAAmount], {account: lpProvider.account});
+    await tokenB.write.approve([amm.address, tokenBAmount], {account: lpProvider.account});
+
+    const reserveX = await amm.read.reserveX();
+    const reserveY = await amm.read.reserveY();
+    const prevK = await amm.read.prevK();
+    const totalSupply = await amm.read.totalSupply();
+    const rootPrevK = sqrtBigInt(prevK);
+    const rootCurrentK = sqrtBigInt(reserveX * reserveY);
+    const numerator = totalSupply * (rootCurrentK - rootPrevK);
+    const denominator = 5n * rootCurrentK + rootPrevK;
+    const liquidity = numerator / denominator;
+
+    const feeRecipientBalanceBeforeAddLiquidity = await amm.read.balanceOf([feeRecepient.account.address]);
+    await amm.write.addLiquidity([parseEther("1"), parseEther("1")], {account: lpProvider.account});
+    const feeRecipientBalanceAfterAddLiquidity = await amm.read.balanceOf([feeRecepient.account.address]);
+
+    assert.equal(liquidity, feeRecipientBalanceAfterAddLiquidity - feeRecipientBalanceBeforeAddLiquidity);
+  });
   
   it("liquidity", async function() {
-    const { tokenA, tokenB, owner, user, lpProvider, amm } = await networkHelpers.loadFixture(deployAmmFixture);
+    const { tokenA, tokenB, lpProvider, amm } = await networkHelpers.loadFixture(deployAmmFixture);
 
+    // add liquidity
     const tokenAAmount = parseEther("1.2");
     const tokenBAmount = parseEther("1.5");
 
     await tokenA.write.mint([lpProvider.account.address, tokenAAmount]);
     await tokenB.write.mint([lpProvider.account.address, tokenBAmount]);
-  
     await tokenA.write.approve([amm.address, tokenAAmount], {account: lpProvider.account});
     await tokenB.write.approve([amm.address, tokenBAmount], {account: lpProvider.account});
 
-    
-    const smithPairBalanceOfTokenXBeforeAddingLiquidity = await tokenA.read.balanceOf([amm.address]);
-    const smithPairBalanceOfTokenYBeforeAddingLiquidity = await tokenB.read.balanceOf([amm.address]);
-    const lpProvideBalanceOfTokenABeforeAddLiquidity = await tokenA.read.balanceOf([lpProvider.account.address]);
-    const lpProvideBalanceOfTokenBBeforeAddLiquidity = await tokenB.read.balanceOf([lpProvider.account.address]);
-    const lpTokenBalanceBefore = await amm.read.balanceOf([lpProvider.account.address]); 
+    const ammXBeforeAddLiquidity = await tokenA.read.balanceOf([amm.address]);
+    const ammYBeforeAddLiquidity = await tokenB.read.balanceOf([amm.address]);
+    const lpProviderXBeforeAddLiquidity = await tokenA.read.balanceOf([lpProvider.account.address]);
+    const lpProviderYBeforeAddLiquidity = await tokenB.read.balanceOf([lpProvider.account.address]);
+    const lpProviderLPBeforeAddLiquidity = await amm.read.balanceOf([lpProvider.account.address]); 
+
     await amm.write.addLiquidity([tokenAAmount, tokenBAmount], {account: lpProvider.account});
 
-    const smithPairBalanceOfTokenXAfterAddingLiquidity = await tokenA.read.balanceOf([amm.address]);
-    const smithPairBalanceOfTokenYAfterAddingLiquidity = await tokenB.read.balanceOf([amm.address]);
+    const ammXAfterAddLiquidity = await tokenA.read.balanceOf([amm.address]);
+    const ammYAfterAddLiquidity = await tokenB.read.balanceOf([amm.address]);
+    const lpProviderXAfterAddLiquidity = await tokenA.read.balanceOf([lpProvider.account.address]);
+    const lpProviderYAfterAddLiquidity = await tokenB.read.balanceOf([lpProvider.account.address]);
+    const lpProviderLPAfterAddLiquidity = await amm.read.balanceOf([lpProvider.account.address]);
 
-    const lpProvideBalanceOfTokenAAfterAddLiquidity = await tokenA.read.balanceOf([lpProvider.account.address]);
-    const lpProvideBalanceOfTokenBAfterAddLiquidity = await tokenB.read.balanceOf([lpProvider.account.address]);
- 
-    assert.equal(tokenAAmount, lpProvideBalanceOfTokenABeforeAddLiquidity - lpProvideBalanceOfTokenAAfterAddLiquidity);
-    assert.equal(tokenBAmount, lpProvideBalanceOfTokenBBeforeAddLiquidity - lpProvideBalanceOfTokenBAfterAddLiquidity);
-  
-    assert.equal(tokenAAmount, smithPairBalanceOfTokenXAfterAddingLiquidity - smithPairBalanceOfTokenXBeforeAddingLiquidity);
-    assert.equal(tokenBAmount, smithPairBalanceOfTokenYAfterAddingLiquidity - smithPairBalanceOfTokenYBeforeAddingLiquidity);
+    assert.equal(tokenAAmount, lpProviderXBeforeAddLiquidity - lpProviderXAfterAddLiquidity);
+    assert.equal(tokenBAmount, lpProviderYBeforeAddLiquidity - lpProviderYAfterAddLiquidity);
+    assert.equal(tokenAAmount, ammXAfterAddLiquidity - ammXBeforeAddLiquidity);
+    assert.equal(tokenBAmount, ammYAfterAddLiquidity - ammYBeforeAddLiquidity);
     
-   
-    const lpTokenBalanceAfter = await amm.read.balanceOf([lpProvider.account.address]);
-
-    const lpDelta = lpTokenBalanceAfter - lpTokenBalanceBefore;
-    const totalSupply = await amm.read.totalSupply();
-    const reserveX = await amm.read.reserveX();
-    const reserveY = await amm.read.reserveY();
+    const lpDelta = lpProviderLPAfterAddLiquidity - lpProviderLPBeforeAddLiquidity;
+    let totalSupply = await amm.read.totalSupply();
+    let reserveX = await amm.read.reserveX();
+    let reserveY = await amm.read.reserveY();
     const expectedDeltaX = tokenAAmount * totalSupply / reserveX; 
     const expectedDeltaY = tokenBAmount * totalSupply / reserveY; 
     const min = (a: bigint, b: bigint): bigint =>
        a < b ? a : b;
     const expectedDelta = min(expectedDeltaX, expectedDeltaY);
-    assert.equal(lpDelta, expectedDelta)
+    assert.equal(lpDelta, expectedDelta);
 
-
+    // remove liquidity
     const removingLiquidity = parseEther("0.3");
 
-    const lpProvideBalanceOfTokenABeforeRemovingLiquidity = await tokenA.read.balanceOf([lpProvider.account.address]);
-    const lpProvideBalanceOfTokenBBeforeRemovingLiquidity = await tokenB.read.balanceOf([lpProvider.account.address]);
-    const lpTokenBalanceBeforeRemovingLiquidity = await amm.read.balanceOf([lpProvider.account.address]); 
+    const ammXBeforeRemoveLiquidity = await tokenA.read.balanceOf([amm.address]);
+    const ammYBeforeRemoveLiquidity = await tokenB.read.balanceOf([amm.address]);
+    const lpProviderXBeforeRemoveLiquidity = await tokenA.read.balanceOf([lpProvider.account.address]);
+    const lpProviderYBeforeRemoveLiquidity = await tokenB.read.balanceOf([lpProvider.account.address]);
+    const lpProviderLPBeforeRemoveLiquidity = await amm.read.balanceOf([lpProvider.account.address]); 
 
     await amm.write.removeLiquidity([lpProvider.account.address, removingLiquidity], {account: lpProvider.account});
 
-    const _totalSupply = await amm.read.totalSupply();
-    const _reserveX = await amm.read.reserveX();
-    const _reserveY = await amm.read.reserveY();
-    const dX = removingLiquidity * _reserveX / _totalSupply;
-    const dY = removingLiquidity * _reserveY / _totalSupply;
+    totalSupply = await amm.read.totalSupply();
+    reserveX = await amm.read.reserveX();
+    reserveY = await amm.read.reserveY();
+    const dX = removingLiquidity * reserveX / totalSupply;
+    const dY = removingLiquidity * reserveY / totalSupply;
  
-    const lpProvideBalanceOfTokenAAfterRemovingLiquidity = await tokenA.read.balanceOf([lpProvider.account.address]);
-    const lpProvideBalanceOfTokenBAfterRemovingLiquidity = await tokenB.read.balanceOf([lpProvider.account.address]);
-    const lpTokenBalanceAfterRemovingLiquidity = await amm.read.balanceOf([lpProvider.account.address]); 
-    assert.equal(removingLiquidity, lpTokenBalanceBeforeRemovingLiquidity - lpTokenBalanceAfterRemovingLiquidity);
-    assert.equal(dX, lpProvideBalanceOfTokenAAfterRemovingLiquidity - lpProvideBalanceOfTokenABeforeRemovingLiquidity);
-    assert.equal(dY, lpProvideBalanceOfTokenBAfterRemovingLiquidity - lpProvideBalanceOfTokenBBeforeRemovingLiquidity);
+    const ammXAfterRemoveLiquidity = await tokenA.read.balanceOf([amm.address]);
+    const ammYAfterRemoveLiquidity = await tokenB.read.balanceOf([amm.address]);
+    const lpProviderXAfterRemoveLiquidity = await tokenA.read.balanceOf([lpProvider.account.address]);
+    const lpProviderYAfterRemoveLiquidity = await tokenB.read.balanceOf([lpProvider.account.address]);
+    const lpProviderLPAfterRemoveLiquidity = await amm.read.balanceOf([lpProvider.account.address]); 
+    assert.equal(removingLiquidity, lpProviderLPBeforeRemoveLiquidity - lpProviderLPAfterRemoveLiquidity);
+    assert.equal(dX, lpProviderXAfterRemoveLiquidity - lpProviderXBeforeRemoveLiquidity);
+    assert.equal(dY, lpProviderYAfterRemoveLiquidity - lpProviderYBeforeRemoveLiquidity);
+    assert.equal(ammXBeforeRemoveLiquidity - ammXAfterRemoveLiquidity, dX);
+    assert.equal(ammYBeforeRemoveLiquidity - ammYAfterRemoveLiquidity, dY);
   });
 
   it("swap", async function() {
- 
     const { tokenA, tokenB, user, amm } = await networkHelpers.loadFixture(deployAmmFixture);
     
     const swapAmount = parseEther("2.5");
@@ -145,7 +189,6 @@ describe("AMM", function () {
     const ammBalanceOfTokenBBeforeSwap = await tokenB.read.balanceOf([amm.address]);
     
     await tokenA.write.approve([amm.address, swapAmount], {account: user.account});
- 
     await amm.write.swapXForY([swapAmount, user.account.address], {account: user.account});
 
     const ammBalanceOfTokenAAfterSwap = await tokenA.read.balanceOf([amm.address]);
@@ -161,3 +204,22 @@ describe("AMM", function () {
     assert.equal(userBalanceOfTokenBAfterSwap - userBalanceOfTokenBBeforeSwap, receiveAmountOfTokenB);
   });
 });
+
+export function sqrtBigInt(value: bigint): bigint {
+  if (value < 0n) {
+    throw new Error("sqrt of negative numbers is not supported");
+  }
+  if (value < 2n) {
+    return value;
+  }
+
+  let x0 = value;
+  let x1 = (x0 + value / x0) >> 1n;
+
+  while (x1 < x0) {
+    x0 = x1;
+    x1 = (x0 + value / x0) >> 1n;
+  }
+
+  return x0;
+}
